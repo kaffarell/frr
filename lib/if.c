@@ -1879,6 +1879,25 @@ static enum nb_error lib_interface_state_metric_get(const struct nb_node *nb_nod
 }
 
 /*
+ * XPath: /frr-interface:lib/interface/state/altnames
+ */
+static enum nb_error lib_interface_state_altnames_get(const struct nb_node *nb_node,
+						      const void *list_entry,
+						      struct lyd_node *parent)
+{
+	const struct lysc_node *snode = nb_node->snode;
+	const struct interface *ifp = list_entry;
+	struct altname *altname;
+
+	RB_FOREACH(altname, altnames_head, (struct altnames_head *)&ifp->altnames) {
+		if (lyd_new_term(parent, snode->module, snode->name, altname->name,
+				 LYD_NEW_PATH_UPDATE, NULL))
+			return NB_ERR_RESOURCE;
+	}
+	return NB_OK;
+}
+
+/*
  * XPath: /frr-interface:lib/interface/state/phy-address
  */
 static struct yang_data *
@@ -1965,6 +1984,12 @@ const struct frr_yang_module_info frr_interface_info = {
 			.xpath = "/frr-interface:lib/interface/state/type",
 			.cbs = {
 				.get = __return_ok,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/state/altnames",
+			.cbs = {
+				.get = lib_interface_state_altnames_get,
 			}
 		},
 		{
