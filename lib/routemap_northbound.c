@@ -9,6 +9,7 @@
 #include <zebra.h>
 
 #include "lib/command.h"
+#include "lib/linklist.h"
 #include "lib/log.h"
 #include "lib/northbound.h"
 #include "lib/routemap.h"
@@ -283,6 +284,63 @@ static int lib_route_map_entry_action_modify(struct nb_cb_modify_args *args)
 	return NB_OK;
 }
 
+static void route_map_call_cycle_visited_free(void *data)
+{
+	XFREE(MTYPE_ROUTE_MAP_NAME, data);
+}
+
+static bool route_map_call_cycle_visited_lookup(struct list *visited,
+						const char *rmap_name)
+{
+	struct listnode *node;
+	char *visited_name;
+
+	for (ALL_LIST_ELEMENTS_RO(visited, node, visited_name))
+		if (strcmp(visited_name, rmap_name) == 0)
+			return true;
+
+	return false;
+}
+
+static bool route_map_call_reaches(const char *from_name, const char *to_name,
+				   struct list *visited)
+{
+	struct route_map *map;
+	struct route_map_index *index;
+
+	if (strcmp(from_name, to_name) == 0)
+		return true;
+
+	if (route_map_call_cycle_visited_lookup(visited, from_name))
+		return false;
+
+	listnode_add(visited, XSTRDUP(MTYPE_ROUTE_MAP_NAME, from_name));
+
+	map = route_map_lookup_by_name(from_name);
+	if (!map)
+		return false;
+
+	for (index = map->head; index; index = index->next)
+		if (index->nextrm
+		    && route_map_call_reaches(index->nextrm, to_name, visited))
+			return true;
+
+	return false;
+}
+
+static bool route_map_call_creates_cycle(const char *rmap_name,
+					 const char *target_name)
+{
+	struct list *visited = list_new();
+	bool creates_cycle;
+
+	visited->del = route_map_call_cycle_visited_free;
+	creates_cycle = route_map_call_reaches(target_name, rmap_name, visited);
+	list_delete(&visited);
+
+	return creates_cycle;
+}
+
 /*
  * XPath: /frr-route-map:lib/route-map/entry/call
  */
@@ -296,10 +354,18 @@ static int lib_route_map_entry_call_modify(struct nb_cb_modify_args *args)
 		rm_name = yang_dnode_get_string(args->dnode, "../../name");
 		rmn_name = yang_dnode_get_string(args->dnode, NULL);
 		/* Don't allow to jump to the same route map instance. */
-		if (strcmp(rm_name, rmn_name) == 0)
+		if (strcmp(rm_name, rmn_name) == 0) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "Route-map '%s' cannot call itself", rm_name);
 			return NB_ERR_VALIDATION;
+		}
 
-		/* TODO: detect circular route map sequences. */
+		if (route_map_call_creates_cycle(rm_name, rmn_name)) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "Route-map call to '%s' would create a cycle",
+				 rmn_name);
+			return NB_ERR_VALIDATION;
+		}
 		break;
 	case NB_EV_PREPARE:
 		rmn_name = yang_dnode_get_string(args->dnode, NULL);

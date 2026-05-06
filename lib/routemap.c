@@ -3083,6 +3083,35 @@ static struct hash *route_map_get_dep_hash(route_map_event_t event)
 	return (upd8_hash);
 }
 
+static struct list *route_map_notify_visited;
+
+static void route_map_notify_visited_free(void *data)
+{
+	XFREE(MTYPE_ROUTE_MAP_NAME, data);
+}
+
+static bool route_map_notify_visited_lookup(const char *rmap_name)
+{
+	struct listnode *node;
+	char *visited_name;
+
+	if (!route_map_notify_visited)
+		return false;
+
+	for (ALL_LIST_ELEMENTS_RO(route_map_notify_visited, node, visited_name))
+		if (strcmp(visited_name, rmap_name) == 0)
+			return true;
+
+	return false;
+}
+
+static void route_map_notify_visited_add(const char *rmap_name)
+{
+	if (!route_map_notify_visited_lookup(rmap_name))
+		listnode_add(route_map_notify_visited,
+			     XSTRDUP(MTYPE_ROUTE_MAP_NAME, rmap_name));
+}
+
 static void route_map_process_dependency(struct hash_bucket *bucket, void *data)
 {
 	struct route_map_dep_data *dep_data = NULL;
@@ -3090,6 +3119,14 @@ static void route_map_process_dependency(struct hash_bucket *bucket, void *data)
 
 	dep_data = bucket->data;
 	rmap_name = dep_data->rname;
+
+	if (route_map_notify_visited_lookup(rmap_name)) {
+		zlog_warn("route-map dependency cycle detected involving %s; skipping repeated notification",
+			  rmap_name);
+		return;
+	}
+
+	route_map_notify_visited_add(rmap_name);
 
 	if (unlikely(CHECK_FLAG(rmap_debug, DEBUG_ROUTEMAP)))
 		zlog_debug("Notifying %s of dependency", rmap_name);
@@ -3123,6 +3160,7 @@ void route_map_notify_dependencies(const char *affected_name,
 	struct route_map_dep *dep;
 	struct hash *upd8_hash;
 	char *name;
+	bool outermost_notify = false;
 
 	if (!affected_name)
 		return;
@@ -3134,6 +3172,20 @@ void route_map_notify_dependencies(const char *affected_name,
 		return;
 	}
 
+	if (!route_map_notify_visited) {
+		route_map_notify_visited = list_new();
+		route_map_notify_visited->del = route_map_notify_visited_free;
+		outermost_notify = true;
+	}
+
+	/*
+	 * Route-map call dependencies can form cycles.  The event hook invoked
+	 * below may call back into route_map_notify_dependencies(), so remember
+	 * route-maps already seen during the whole nested notification walk.
+	 */
+	if (upd8_hash == route_map_dep_hash[ROUTE_MAP_DEP_RMAP])
+		route_map_notify_visited_add(affected_name);
+
 	dep = hash_lookup(upd8_hash, name);
 	if (dep) {
 		if (!dep->this_hash)
@@ -3144,6 +3196,9 @@ void route_map_notify_dependencies(const char *affected_name,
 		hash_iterate(dep->dep_rmap_hash, route_map_process_dependency,
 			     (void *)event);
 	}
+
+	if (outermost_notify)
+		list_delete(&route_map_notify_visited);
 
 	XFREE(MTYPE_ROUTE_MAP_NAME, name);
 }
